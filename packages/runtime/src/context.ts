@@ -217,6 +217,19 @@ export async function discoverSessionContext(
 	setAgentCatalog: (entries: readonly SkillCatalogEntry[]) => void;
 	mergeSkills: (nextDefinitionSkills: readonly Skill[]) => Record<string, RegisteredSkill>;
 }> {
+	// ZeroY: an explicit remote discovery opt-out. A workspace whose files live behind SQL has no
+	// filesystem to read, and Flue's discovery would answer from the container's own empty cwd —
+	// putting an AGENTS.md that does not exist, and a directory listing that is not the workspace,
+	// into the prompt. Declared skills still register; the prompt says where the work actually is
+	// and that the file tools are the way to see it.
+	if (env?.discoverContext === false) {
+		const context = await discoverSessionContext(undefined, definitionSkills);
+		const recompose = context.recompose;
+		context.recompose = (instructions) =>
+			recompose(instructions) +
+			`\nWorking directory: ${env.cwd}\nUse explicit file tools to inspect this remote workspace.`;
+		return context;
+	}
 	// No sandbox, no workspace: nothing to discover. Declared skills still
 	// register, and the composed prompt simply carries no workspace facts.
 	const agentsMd = env ? await readAgentsMd(env, env.cwd) : '';

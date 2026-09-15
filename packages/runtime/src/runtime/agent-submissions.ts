@@ -505,9 +505,65 @@ export async function reconcileInterruptedSubmission(
 	// requeue branches — exhausting either must never discard (or append a
 	// contradictory interruption advisory over) work that already completed.
 	const ctx = createContext(input.submissionId);
-	const state = (await createAgentSubmissionSessionHandler(agent, input, (s) =>
-		s.inspectSubmissionInput(input),
-	)(ctx)) as AgentSubmissionInspection;
+	// ZeroY: an attempt that cannot even initialize never reached the branches below, so nothing
+	// settled it and its retry budget never advanced — the supervisor restarted it forever. A model
+	// specifier no registered provider can resolve is exactly that case (a `byok/*` conversation
+	// whose endpoint the render could not find), and it produced tens of thousands of failures a
+	// minute. Every condition that ends an attempt is readable without a harness, so they are read
+	// before the one call that can throw; anything else is rethrown unchanged.
+	let state: AgentSubmissionInspection;
+	try {
+		state = (await createAgentSubmissionSessionHandler(agent, input, (s) =>
+			s.inspectSubmissionInput(input),
+		)(ctx)) as AgentSubmissionInspection;
+	} catch (error) {
+		if (submission.abortRequestedAt !== undefined) {
+			await settleAbortedWithContext(
+				submissions,
+				submission,
+				attempt,
+				agent,
+				createContext(input.submissionId),
+				conversationWriter,
+				emitCoordinatorEvent,
+			);
+			return undefined;
+		}
+		if (submission.timeoutAt > 0 && Date.now() >= submission.timeoutAt) {
+			await failInterruptedSubmission(
+				submissions,
+				submission,
+				attempt,
+				agent,
+				'exceeded_timeout',
+				() => new SubmissionTimeoutError(),
+				createContext,
+				conversationWriter,
+				emitCoordinatorEvent,
+			);
+			return undefined;
+		}
+		if (submission.attemptCount >= submission.maxAttempts) {
+			await failInterruptedSubmission(
+				submissions,
+				submission,
+				attempt,
+				agent,
+				'exhausted_retry_budget',
+				(interruptedTools) =>
+					new SubmissionRetryExhaustedError({
+						attemptCount: submission.attemptCount,
+						maxAttempts: submission.maxAttempts,
+						...(interruptedTools ? { interruptedTools } : {}),
+					}),
+				createContext,
+				conversationWriter,
+				emitCoordinatorEvent,
+			);
+			return undefined;
+		}
+		throw error;
+	}
 	if (state === 'completed') {
 		await settleJoinedSubmissions(
 			submissions,
@@ -1326,6 +1382,32 @@ export async function finalizePendingSettlement(
 }
 
 /**
+ * ZeroY: the cause of an unclassified submission failure, small enough to ride the settlement's
+ * tenant-visible message without publishing an internal stack. The sentence itself is deliberately
+ * identical for every non-FlueError, so a window of them cannot be split by cause: one 24h read
+ * carried 29 settlements across 15 tenants behind it, and the ledger's signature — which is this
+ * message — read one issue where there were at least two. The cause is the error's own name and the
+ * first line of its message with the parts that vary per occurrence masked (uuid, the
+ * `reference = <token>` a runtime support report carries, long opaque tokens), so repeated
+ * occurrences of one cause keep one signature.
+ */
+function internalErrorCause(error: unknown): string {
+	if (!(error instanceof Error)) return '';
+	const name = typeof error.name === 'string' && error.name.length > 0 ? error.name : 'Error';
+	const first = String(error.message ?? '')
+		.split('\n')[0]!
+		.replace(
+			/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+			'<uuid>',
+		)
+		.replace(/\breference\s*=\s*[A-Za-z0-9_-]+/gi, 'reference = <ref>')
+		.replace(/\b[A-Za-z0-9_-]{20,}\b/g, '<token>')
+		.trim()
+		.slice(0, 120);
+	return first.length > 0 ? ` (${name}: ${first})` : ` (${name})`;
+}
+
+/**
  * The durable-shaped, stackless error projection shared by the settlement
  * record, the live `submission_settled` event, and `submission_recovery`
  * payloads. Non-`FlueError` failures are replaced wholesale — internal
@@ -1352,7 +1434,7 @@ export function serializeSubmissionError(error: unknown): {
 	}
 	return {
 		name: 'Error',
-		message: 'The agent submission failed because of an internal error.',
+		message: 'The agent submission failed because of an internal error.' + internalErrorCause(error),
 		type: 'internal_error',
 		details:
 			'The server encountered an unexpected error while processing the agent submission. ' +

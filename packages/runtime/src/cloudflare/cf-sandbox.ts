@@ -126,6 +126,12 @@ function raceContainerDeath<T>(
 		let settled = false;
 		let pollTimer: ReturnType<typeof setTimeout> | undefined;
 		let silenceTimer: ReturnType<typeof setTimeout> | undefined;
+		// ZeroY: whether the container answered as alive when this call was issued. A Sandbox that is
+		// stopped at that moment has not died — the provider starts it on demand, and until an
+		// instance exists it reports `stopped` — so rejecting on that status declared every cold
+		// start a death and lost the tool for the whole turn. Only a container that was alive and
+		// then stopped died in flight, which is the one thing this watcher is here to catch.
+		let aliveAtIssue: boolean | undefined;
 
 		const settle = (complete: () => void): void => {
 			if (settled) return;
@@ -143,7 +149,7 @@ function raceContainerDeath<T>(
 				({ status }) => {
 					if (settled) return;
 					clearTimeout(silenceTimer);
-					if (status === 'stopped' || status === 'stopped_with_code') {
+					if (aliveAtIssue === true && (status === 'stopped' || status === 'stopped_with_code')) {
 						settle(() => reject(new SandboxDiedError({ operation, reason: 'stopped' })));
 					} else {
 						pollTimer = setTimeout(probe, statePollMs);
@@ -158,7 +164,20 @@ function raceContainerDeath<T>(
 				},
 			);
 		};
-		pollTimer = setTimeout(probe, statePollMs);
+		// Watch for a death only once the state this call was issued against is known; a probe that
+		// cannot answer is not evidence that the container was stopped, so the previous rule stands.
+		sandbox.getState().then(
+			({ status }) => {
+				if (settled) return;
+				aliveAtIssue = status !== 'stopped' && status !== 'stopped_with_code';
+				pollTimer = setTimeout(probe, statePollMs);
+			},
+			() => {
+				if (settled) return;
+				aliveAtIssue = true;
+				pollTimer = setTimeout(probe, statePollMs);
+			},
+		);
 
 		// These handlers double as the losing branch's rejection consumer, so a
 		// late settlement after death can't surface as an unhandled rejection.

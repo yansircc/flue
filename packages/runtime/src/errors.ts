@@ -464,7 +464,14 @@ export class ConversationRecordInvariantError extends FlueError {
 	}) {
 		super({
 			type: 'conversation_record_invariant',
-			message: 'A canonical conversation record violates the conversation stream contract.',
+			// ZeroY: `reason` names which invariant broke, and the message is the only field that
+			// survives to the persisted assistant `errorMessage` — the same transport Flue's own
+			// WORKERS_AI_OVERFLOW_MARKER and RETRYABLE_INTERRUPTION_MARKER use, for the same reason.
+			// Without it every occurrence reads as one indistinguishable sentence: 82 production
+			// failures over one day and 30 tenants, with nothing to tell them apart.
+			message:
+				'A canonical conversation record violates the conversation stream contract.' +
+				(reason ? ` (${recordType}: ${reason})` : ''),
 			details: 'The persisted conversation cannot be reduced safely.',
 			dev: reason,
 			meta: { recordId, recordType, reason },

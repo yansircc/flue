@@ -2497,7 +2497,22 @@ export class Session implements FlueSession, AgentSubmissionSession {
 									...this.canonicalEnvelope('assistant_message_completed'),
 									type: 'assistant_message_completed',
 									messageId: canonical.messageId,
-									stopReason: event.message.stopReason,
+									// ZeroY: a turn that carries tool calls is persisted as a tool-use turn
+									// whenever the engine answers those calls with results — which it does
+									// for every stop reason except the two it returns early on (`error` and
+									// `aborted`), and which it also does for a `length`-truncated message,
+									// whose calls it fails with error results instead of executing them. The
+									// commit invariant for a result batch, and the context builder that must
+									// see one, both key on `toolUse`; persisting the provider's own `length`
+									// there made that commit violate the contract, failing the submission and
+									// dropping the tool call.
+									stopReason: event.message.content.some(
+										(content) => content.type === 'toolCall',
+									) &&
+									event.message.stopReason !== 'error' &&
+									event.message.stopReason !== 'aborted'
+										? 'toolUse'
+										: event.message.stopReason,
 									usage: event.message.usage,
 									...(event.message.errorMessage ? { error: event.message.errorMessage } : {}),
 								},

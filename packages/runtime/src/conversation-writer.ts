@@ -38,7 +38,10 @@ type WriterLifecycle = { status: 'active' } | { status: 'failed'; error: unknown
  * (deltas reach observers sooner, in smaller batches) at the cost of more
  * durable writes; higher = fewer writes but burstier streaming.
  */
-const CANONICAL_FLUSH_DELAY_MS = 1000;
+// ZeroY: 1000 made live streaming read as bursts — a delta written up to a second after the model
+// produced it. 50 keeps the coalescing (the timer still exists to avoid one durable write per
+// token) while the reader sees the answer arrive rather than appear.
+const CANONICAL_FLUSH_DELAY_MS = 50;
 
 export class ConversationRecordWriter {
 	private lifecycle: WriterLifecycle = { status: 'active' };

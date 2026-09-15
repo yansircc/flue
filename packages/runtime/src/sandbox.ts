@@ -199,6 +199,9 @@ export function createCwdSandbox(parentEnv: Sandbox, cwd: string): Sandbox {
 	const resolvePath = makeResolvePath(scopedCwd);
 
 	return {
+		// Carried through, not re-decided: the caller that built the parent sandbox is the only
+		// thing that knows whether this workspace has a filesystem to discover.
+		discoverContext: parentEnv.discoverContext,
 		exec: (cmd, opts) =>
 			parentEnv.exec(cmd, {
 				cwd: opts?.cwd !== undefined ? resolvePath(opts.cwd) : scopedCwd,

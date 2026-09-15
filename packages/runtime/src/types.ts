@@ -257,6 +257,14 @@ export interface FileStat {
  * File methods accept both absolute and relative paths (resolved against `cwd`).
  */
 export interface Sandbox {
+	/**
+	 * ZeroY: when false, the runtime must not discover a filesystem context for this sandbox
+	 * (AGENTS.md, local skills, a directory listing). A remote workspace whose files live behind SQL
+	 * has no filesystem to discover, and faking one puts files that do not exist into the agent's
+	 * prompt; the prompt then says where the work actually is and that the file tools are the way to
+	 * see it.
+	 */
+	discoverContext?: boolean;
 	exec(
 		command: string,
 		options?: {

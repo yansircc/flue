@@ -237,7 +237,9 @@ export function createEditTool(env: Sandbox): AgentTool<typeof EditParams> {
 				if (params.replaceAll) {
 					const newContent = content.replaceAll(params.oldText, () => params.newText);
 					if (newContent === content) {
-						throw new Error(`Could not find the text in ${params.path}. No changes made.`);
+						throw new Error(
+							`Could not find the text in ${params.path}. No changes made.${nearestBlockReport(content, params.oldText)}`,
+						);
 					}
 					await env.writeFile(params.path, newContent);
 					const count = content.split(params.oldText).length - 1;
@@ -250,7 +252,7 @@ export function createEditTool(env: Sandbox): AgentTool<typeof EditParams> {
 				const occurrences = countOccurrences(content, params.oldText);
 				if (occurrences === 0) {
 					throw new Error(
-						`Could not find the exact text in ${params.path}. Make sure your oldText matches exactly, including whitespace and indentation.`,
+						`Could not find the exact text in ${params.path}. Make sure your oldText matches exactly, including whitespace and indentation.${nearestBlockReport(content, params.oldText)}`,
 					);
 				}
 				if (occurrences > 1) {
@@ -658,10 +660,12 @@ function wrapBase64ForReading(content: string): string {
 
 function formatReadContent(path: string, content: string, offset?: number, limit?: number) {
 	const allLines = content.split('\n');
-	const startLine = offset ? Math.max(0, offset - 1) : 0;
-	if (startLine >= allLines.length) {
-		throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
-	}
+	const requestedLine = offset ? Math.max(0, offset - 1) : 0;
+	// ZeroY: an offset past the end is answered, not refused. The refusal carried the file's line
+	// count and nothing else, which left the model with a guess; the reader asked for a window this
+	// file does not have, so it gets the last page plus the file's real line count.
+	const page = limit && limit > 0 ? limit : MAX_READ_LINES;
+	const startLine = Math.min(requestedLine, Math.max(0, allLines.length - page));
 
 	const endLine = limit ? startLine + limit : allLines.length;
 	const lines = allLines.slice(startLine, endLine);
@@ -672,6 +676,11 @@ function formatReadContent(path: string, content: string, offset?: number, limit
 	} = truncateHead(lines, MAX_READ_LINES, MAX_READ_BYTES);
 
 	let output = truncatedText;
+	if (requestedLine > startLine) {
+		output =
+			`[Offset ${offset} is past the end of ${path}: the file has ${allLines.length} lines. Showing the last page, lines ${startLine + 1}-${Math.min(endLine, allLines.length)}.]\n\n` +
+			output;
+	}
 	if (wasTruncated && linesEmitted === 0) {
 		// The first requested line alone exceeds the byte budget (e.g. a
 		// minified single-line file). There is no line-based offset that
@@ -701,6 +710,48 @@ function countOccurrences(str: string, substr: string): number {
 		pos = str.indexOf(substr, pos + Math.max(substr.length, 1));
 	}
 	return count;
+}
+
+/**
+ * Where the text the caller looked for actually is, when it is there but not exactly: the window of
+ * file lines whose whitespace-stripped text agrees with `oldText`'s most closely, with the file's own
+ * line numbers and each line's indent counted. ONE line, on purpose: a failed tool's message reaches
+ * the model through this platform's `storageFailure`, which collapses every whitespace run, so a
+ * multi-line block would arrive with its newlines and its indentation flattened — and indentation is
+ * the very thing the caller missed. Empty when no line agrees, because then there is nothing true to
+ * say.
+ */
+function nearestBlockReport(content: string, oldText: string): string {
+	const fileLines = content.split('\n');
+	const wanted = oldText.split('\n').map((line) => line.trim());
+	const size = Math.min(Math.max(wanted.length, 1), 12);
+	let best = { start: -1, score: 0 };
+	for (let start = 0; start + size <= fileLines.length; start++) {
+		let score = 0;
+		for (let at = 0; at < size; at++) if (fileLines[start + at]!.trim() === wanted[at]) score++;
+		if (score > best.score) best = { start, score };
+	}
+	if (best.start < 0 || best.score === 0) return '';
+	const quoted = fileLines
+		.slice(best.start, best.start + size)
+		.map((line) => {
+			const lead = line.slice(0, line.length - line.trimStart().length);
+			const text = line.trim();
+			const shown = text.length > 120 ? `${text.slice(0, 120)}...` : text;
+			return `"${shown}"${lead === '' ? '' : ` (indent ${indentWords(lead)})`}`;
+		})
+		.join('; ');
+	const lines = `${best.start + 1}-${best.start + size}`;
+	return best.score === size
+		? ` The same lines are at ${lines}, whitespace apart: ${quoted}.`
+		: ` Closest block is at ${lines} (${best.score} of ${size} lines, whitespace apart): ${quoted}.`;
+}
+
+/** Leading whitespace in words, because a failed tool's message loses every space run it carries. */
+function indentWords(lead: string): string {
+	if (/^ +$/.test(lead)) return lead.length === 1 ? '1 space' : `${lead.length} spaces`;
+	if (/^\t+$/.test(lead)) return lead.length === 1 ? '1 tab' : `${lead.length} tabs`;
+	return `${lead.length} mixed whitespace characters`;
 }
 
 function shellQuote(arg: string): string {
